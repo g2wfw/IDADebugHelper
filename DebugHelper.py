@@ -1,6 +1,7 @@
 import base64
 import binascii
 
+import ida_bytes
 import ida_dbg
 import ida_idaapi
 import ida_kernwin
@@ -8,6 +9,7 @@ import ida_segment
 import idaapi
 import idautils
 import idc
+import clipboard
 
 
 class MenuContext(idaapi.action_handler_t):
@@ -21,15 +23,23 @@ class MenuContext(idaapi.action_handler_t):
         return self.label
 
     @classmethod
-    def register(self, plugin, label):
+    def register(self, plugin, label, shortcut=None):
         self.plugin = plugin
         self.label = label
         instance = self()
-        return idaapi.register_action(idaapi.action_desc_t(
-            self.get_name(),  # Name. Acts as an ID. Must be unique.
-            instance.get_label(),  # Label. That's what users see.
-            instance  # Handler. Called when activated, and for updating
-        ))
+        if shortcut is None:
+            return idaapi.register_action(idaapi.action_desc_t(
+                self.get_name(),  # Name. Acts as an ID. Must be unique.
+                instance.get_label(),  # Label. That's what users see.
+                instance,  # Handler. Called when activated, and for updating
+            ))
+        else:
+            return idaapi.register_action(idaapi.action_desc_t(
+                self.get_name(),  # Name. Acts as an ID. Must be unique.
+                instance.get_label(),  # Label. That's what users see.
+                instance,  # Handler. Called when activated, and for updating
+                shortcut,  # Optional shortcut
+            ))
 
     @classmethod
     def unregister(self):
@@ -106,6 +116,36 @@ class RVAJumpMenu(MenuContext):
         return 1
 
 
+class RVAOffsetMenu(MenuContext):
+    def activate(self, ctx):
+        ea = ida_kernwin.get_screen_ea()
+        for mod in idautils.Modules():
+            if mod.base <= ea <= (mod.base + mod.size):
+                clipboard.copy(hex(ea - mod.base))
+        return 1
+
+
+class CopyWord(MenuContext):
+    def activate(self, ctx):
+        ea = ida_kernwin.get_screen_ea()
+        clipboard.copy(hex(ida_bytes.get_word(ea)))
+        return 1
+
+
+class CopyDWord(MenuContext):
+    def activate(self, ctx):
+        ea = ida_kernwin.get_screen_ea()
+        clipboard.copy(hex(ida_bytes.get_dword(ea)))
+        return 1
+
+
+class CopyQWord(MenuContext):
+    def activate(self, ctx):
+        ea = ida_kernwin.get_screen_ea()
+        clipboard.copy(hex(ida_bytes.get_qword(ea)))
+        return 1
+
+
 class DumpMemoryForm(idaapi.Form):
     def __init__(self, module_address):
         template = r"""STARTITEM 0
@@ -119,15 +159,14 @@ dump memory to file
                 """
         super(DumpMemoryForm, self).__init__(template, {
             'FormChangeCb': self.FormChangeCb(self.OnFormChange),
-            'start_address': self.NumericInput(value=module_address, tp=self.FT_HEX,swidth=40),
-            'end_address': self.NumericInput(value=0, tp=self.FT_HEX,swidth=40),
-            'dump_size': self.NumericInput(value=0, tp=self.FT_HEX,swidth=40),
+            'start_address': self.NumericInput(value=module_address, tp=self.FT_HEX, swidth=40),
+            'end_address': self.NumericInput(value=0, tp=self.FT_HEX, swidth=40),
+            'dump_size': self.NumericInput(value=0, tp=self.FT_HEX, swidth=40),
         })
         self.Compile()
 
     def OnFormChange(self, fid):
         return 1
-
 
 
 class DumpMemu(MenuContext):
@@ -288,11 +327,13 @@ Copy From Memory
             read_bytes = idc.get_bytes(dump_address, length, ida_dbg.is_debugger_on())
             hex_str = str(binascii.hexlify(read_bytes).decode('utf-8'))
             self.SetControlValue(self.input_data, hex_str)
+            clipboard.copy(hex_str)
             return
         elif data_type_value == 1:
             read_bytes = idc.get_bytes(dump_address, length, ida_dbg.is_debugger_on())
             base64_str = base64.b64encode(read_bytes).decode('utf-8')
             self.SetControlValue(self.input_data, base64_str)
+            clipboard.copy(base64_str)
         elif data_type_value == 2:
             self.EnableField(self.data_length, False)
             temp_address = dump_address
@@ -305,6 +346,7 @@ Copy From Memory
                 read_bytes += read_byte
             ascii_str = read_bytes.decode('utf-8')
             self.SetControlValue(self.input_data, ascii_str)
+            clipboard.copy(ascii_str)
 
     def get_data_length(self):
         length = self.GetControlValue(self.data_length)
@@ -359,7 +401,6 @@ Copy From Memory
         return 1
 
 
-
 class CopyMemoryData(MenuContext):
     def activate(self, ctx):
         ea = ida_kernwin.get_screen_ea()
@@ -386,10 +427,14 @@ class DebuggerUiHook(ida_kernwin.UI_Hooks):
         if ida_kernwin.get_widget_type(form) == idaapi.BWN_DISASM:
             ida_kernwin.attach_action_to_popup(form, popup, JumpToHexView.get_name())
             ida_kernwin.attach_action_to_popup(form, popup, RVAJumpMenu.get_name())
+            ida_kernwin.attach_action_to_popup(form, popup, RVAOffsetMenu.get_name())
         elif ida_kernwin.get_widget_type(form) == dump_type:
             ida_kernwin.attach_action_to_popup(form, popup, DumpMemu.get_name())
             ida_kernwin.attach_action_to_popup(form, popup, WriteMemoryData.get_name())
-            ida_kernwin.attach_action_to_popup(form, popup, CopyMemoryData.get_name())
+            ida_kernwin.attach_action_to_popup(form, popup, CopyMemoryData.get_name(),"Copy/")
+            ida_kernwin.attach_action_to_popup(form, popup, CopyWord.get_name(),"Copy/")
+            ida_kernwin.attach_action_to_popup(form, popup, CopyDWord.get_name(),"Copy/")
+            ida_kernwin.attach_action_to_popup(form, popup, CopyQWord.get_name(),"Copy/")
 
 
 class IdaDebuggerPlugin(ida_idaapi.plugin_t):
@@ -404,6 +449,10 @@ class IdaDebuggerPlugin(ida_idaapi.plugin_t):
             CopyMemoryData.register(self, "Copy Data")
             JumpToHexView.register(self, "Sync HexView")
             RVAJumpMenu.register(self, "RVA Jump")
+            RVAOffsetMenu.register(self, "RVA Offset")
+            CopyWord.register(self, "Copy Word")
+            CopyDWord.register(self, "Copy DWord")
+            CopyQWord.register(self, "Copy QWord")
         except:
             pass
         self.popup_ui_hook = DebuggerUiHook()
